@@ -39,3 +39,14 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# Secrets and local env
+.env
+.env.*
+!.env.example
+
+# Tooling
+.claude/
+*.keystore
+android/
+ios/

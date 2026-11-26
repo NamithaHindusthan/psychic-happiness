@@ -1,0 +1,118 @@
+name: Build Android APK
+
+# Tap: Actions tab -> "Build Android APK" -> Run workflow.
+# Result: a GitHub Release (under the "Releases" section of the repo) with TaskNest.apk attached.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-apk
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      EXPO_PUBLIC_SUPABASE_URL: ${{ secrets.EXPO_PUBLIC_SUPABASE_URL }}
+      EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
+      EXPO_NO_TELEMETRY: '1'
+      CI: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check required secrets
+        run: |
+          missing=0
+          for v in EXPO_PUBLIC_SUPABASE_URL EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY; do
+            if [ -z "${!v}" ]; then echo "::error::Missing GitHub secret $v (repo Settings -> Secrets and variables -> Actions)"; missing=1; fi
+          done
+          exit $missing
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check, lint and test
+        run: |
+          npm run typecheck
+          npm run lint
+          npm test
+
+      - name: Use the run number as the Android versionCode
+        run: |
+          node -e '
+            const fs = require("fs");
+            const a = JSON.parse(fs.readFileSync("app.json", "utf8"));
+            a.expo.android.versionCode = Number(process.env.GITHUB_RUN_NUMBER);
+            fs.writeFileSync("app.json", JSON.stringify(a, null, 2));
+          '
+
+      - name: Generate the native Android project
+        run: npx expo prebuild --platform android --no-install
+
+      - name: Prepare signing key
+        id: signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          KS="$RUNNER_TEMP/tasknest.keystore"
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEYSTORE_PASSWORD" ] && [ -n "$KEY_ALIAS" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$KS"
+            echo "stable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::No signing secrets found. Using a one-off key: this APK installs fine, but a later build will NOT install over it (uninstall first). See docs/SETUP.md to add a permanent key."
+            KEYSTORE_PASSWORD="$(openssl rand -hex 12)"
+            KEY_ALIAS=tasknest
+            keytool -genkeypair -v -keystore "$KS" -storepass "$KEYSTORE_PASSWORD" -keypass "$KEYSTORE_PASSWORD" \
+              -alias "$KEY_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=TaskNest, O=TaskNest, C=IN"
+            echo "stable=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "::add-mask::$KEYSTORE_PASSWORD"
+          {
+            echo "tasknest.keystore=$KS"
+            echo "tasknest.storePassword=$KEYSTORE_PASSWORD"
+            echo "tasknest.keyAlias=$KEY_ALIAS"
+            echo "tasknest.keyPassword=$KEYSTORE_PASSWORD"
+          } >> android/gradle.properties
+
+      - name: Build release APK
+        working-directory: android
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Verify the APK is signed
+        run: |
+          APK="android/app/build/outputs/apk/release/app-release.apk"
+          test -f "$APK"
+          "$ANDROID_HOME"/build-tools/*/apksigner verify --print-certs "$APK" | head -5
+          cp "$APK" TaskNest.apk
+          ls -lh TaskNest.apk
+
+      - name: Publish to Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="build-${GITHUB_RUN_NUMBER}"
+          gh release create "$TAG" TaskNest.apk \
+            --title "TaskNest build ${GITHUB_RUN_NUMBER}" \
+            --notes "Commit ${GITHUB_SHA::7}. Download TaskNest.apk below and open it on your phone to install."
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TaskNest-apk
+          path: TaskNest.apk
+          retention-days: 14
