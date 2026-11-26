@@ -94,7 +94,9 @@ jobs:
 
       - name: Build release APK
         working-directory: android
-        run: ./gradlew assembleRelease --no-daemon
+        # arm64-v8a covers practically every Android phone made since ~2017 and keeps the APK small
+        # (~35 MB instead of ~97 MB with all four chip types).
+        run: ./gradlew assembleRelease --no-daemon -PreactNativeArchitectures=arm64-v8a
 
       - name: Verify the APK is signed
         run: |
