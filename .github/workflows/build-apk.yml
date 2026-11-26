@@ -83,6 +83,8 @@ jobs:
             echo "stable=false" >> "$GITHUB_OUTPUT"
           fi
           echo "::add-mask::$KEYSTORE_PASSWORD"
+          # gradle.properties does not end with a newline, so start on a fresh line.
+          echo "" >> android/gradle.properties
           {
             echo "tasknest.keystore=$KS"
             echo "tasknest.storePassword=$KEYSTORE_PASSWORD"
